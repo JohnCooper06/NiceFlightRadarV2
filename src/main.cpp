@@ -514,11 +514,11 @@ bool fetchAircraftNetwork()
     );
 
     String url =
-        "https://api.airplanes.live/v2/point/" +
+        "https://opendata.adsb.fi/api/v3/lat/" +
         String(RADAR_LAT, 4) +
-        "/" +
+        "/lon/" +
         String(RADAR_LON, 4) +
-        "/" +
+        "/dist/" +
         String(API_RADIUS_NM);
 
     Serial.println();

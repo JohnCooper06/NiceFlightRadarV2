@@ -5,7 +5,7 @@
 
 // ============================================================
 // NiceFlightRadar V2
-// Radar Graphics Probe V2.3
+// Geographic Radar V2.4
 // ESP32-4848S040 / ESP32-S3 / ST7701 / GT911
 // ============================================================
 
@@ -75,6 +75,21 @@ static const int RADAR_R  = 215;
 static const float MAP_ROTATION_DEG = 90.0f;
 
 // ------------------------------------------------------------
+// Geographic radar configuration
+// ------------------------------------------------------------
+
+// Nice Côte d'Azur airport reference point.
+// This is the center of our radar projection.
+static const double RADAR_LAT = 43.6584;
+static const double RADAR_LON = 7.2159;
+
+// Current LOCAL range.
+static const float RADAR_RANGE_NM = 25.0f;
+
+static const double EARTH_RADIUS_M = 6371000.0;
+static const double METERS_PER_NM  = 1852.0;
+
+// ------------------------------------------------------------
 // Colors
 // ------------------------------------------------------------
 
@@ -92,19 +107,24 @@ uint16_t COL_DEPARTURE;
 // ------------------------------------------------------------
 
 struct DemoAircraft {
-    float bearing;
-    float radius;
+    double lat;
+    double lon;
     float heading;
     const char *label;
     bool arrival;
 };
 
+// Temporary geographic test traffic.
+//
+// Unlike V2.3, these aircraft are now positioned using latitude /
+// longitude. This is the same projection path that will later be
+// fed directly by the live ADS-B API.
 DemoAircraft aircraft[] = {
-    { 335.0f, 0.72f, 150.0f, "AFR41",  true  },
-    {  48.0f, 0.50f, 238.0f, "EZY82",  false },
-    { 122.0f, 0.82f, 290.0f, "BAW34",  true  },
-    { 205.0f, 0.61f,  35.0f, "SWR5K",  false },
-    { 268.0f, 0.35f,  95.0f, "DLH7A",  true  }
+    {43.7050, 7.2850, 230.0f, "AFR41", true },
+    {43.5900, 7.1200,  55.0f, "EZY82", false},
+    {43.7600, 7.0500, 145.0f, "BAW34", true },
+    {43.5200, 7.3600, 315.0f, "SWR5K", false},
+    {43.6700, 7.4300, 270.0f, "DLH7A", true }
 };
 
 static const int AIRCRAFT_COUNT =
@@ -189,6 +209,113 @@ float screenAngleForBearing(float bearing)
     return bearing - 90.0f + MAP_ROTATION_DEG;
 }
 
+// Forward declaration used by geoToScreen()
+void polarToScreen(
+    float bearing,
+    float radius,
+    int &x,
+    int &y
+);
+
+float geographicDistanceNm(
+    double lat1,
+    double lon1,
+    double lat2,
+    double lon2
+)
+{
+    double p1 = degToRad(lat1);
+    double p2 = degToRad(lat2);
+
+    double dp = degToRad(lat2 - lat1);
+    double dl = degToRad(lon2 - lon1);
+
+    double a =
+        sin(dp / 2.0) * sin(dp / 2.0) +
+        cos(p1) * cos(p2) *
+        sin(dl / 2.0) * sin(dl / 2.0);
+
+    double c =
+        2.0 * atan2(
+            sqrt(a),
+            sqrt(1.0 - a)
+        );
+
+    double meters =
+        EARTH_RADIUS_M * c;
+
+    return meters / METERS_PER_NM;
+}
+
+float geographicBearing(
+    double lat1,
+    double lon1,
+    double lat2,
+    double lon2
+)
+{
+    double p1 = degToRad(lat1);
+    double p2 = degToRad(lat2);
+    double dl = degToRad(lon2 - lon1);
+
+    double y =
+        sin(dl) * cos(p2);
+
+    double x =
+        cos(p1) * sin(p2) -
+        sin(p1) * cos(p2) * cos(dl);
+
+    double bearing =
+        atan2(y, x) * 180.0 / PI;
+
+    if (bearing < 0.0)
+        bearing += 360.0;
+
+    return bearing;
+}
+
+bool geoToScreen(
+    double lat,
+    double lon,
+    int &x,
+    int &y,
+    float &distanceNm,
+    float &bearing
+)
+{
+    distanceNm =
+        geographicDistanceNm(
+            RADAR_LAT,
+            RADAR_LON,
+            lat,
+            lon
+        );
+
+    bearing =
+        geographicBearing(
+            RADAR_LAT,
+            RADAR_LON,
+            lat,
+            lon
+        );
+
+    if (distanceNm > RADAR_RANGE_NM)
+        return false;
+
+    float radius =
+        (distanceNm / RADAR_RANGE_NM) *
+        RADAR_R;
+
+    polarToScreen(
+        bearing,
+        radius,
+        x,
+        y
+    );
+
+    return true;
+}
+
 void polarToScreen(
     float bearing,
     float radius,
@@ -248,15 +375,25 @@ void drawDemoAircraft()
         int x;
         int y;
 
-        polarToScreen(
-            ac.bearing,
-            ac.radius * RADAR_R,
-            x,
-            y
-        );
+        float distanceNm;
+        float bearing;
+
+        if (!geoToScreen(
+                ac.lat,
+                ac.lon,
+                x,
+                y,
+                distanceNm,
+                bearing
+            ))
+        {
+            continue;
+        }
 
         uint16_t color =
-            ac.arrival ? COL_ARRIVAL : COL_DEPARTURE;
+            ac.arrival
+                ? COL_ARRIVAL
+                : COL_DEPARTURE;
 
         drawAircraftSymbol(
             x,
@@ -266,8 +403,20 @@ void drawDemoAircraft()
         );
 
         gfx->setTextColor(color);
-        gfx->setCursor(x + 8, y - 9);
+        gfx->setCursor(
+            x + 8,
+            y - 10
+        );
+
         gfx->print(ac.label);
+
+        // Distance underneath aircraft label.
+        gfx->setCursor(
+            x + 8,
+            y + 1
+        );
+
+        gfx->printf("%.1fNM", distanceNm);
     }
 }
 
@@ -363,7 +512,7 @@ void drawHeader()
     gfx->print("NICE FLIGHT RADAR V2");
 
     gfx->setCursor(390, 8);
-    gfx->print("25 NM");
+    gfx->printf("%.0f NM", RADAR_RANGE_NM);
 }
 
 void drawHomeAndAirport()
@@ -414,7 +563,7 @@ void drawFooter()
     gfx->setTextColor(COL_TEXT);
 
     gfx->setCursor(10, 464);
-    gfx->print("RADAR V2.3");
+    gfx->print("RADAR V2.4");
 
     gfx->setCursor(370, 464);
     gfx->print("5 AC");
@@ -521,7 +670,7 @@ void setup()
     Serial.println();
     Serial.println("========================================");
     Serial.println(" NiceFlightRadar V2");
-    Serial.println(" Radar Graphics Probe V2.3");
+    Serial.println(" Geographic Radar V2.4");
     Serial.println(" ESP32-4848S040");
     Serial.println("========================================");
 
@@ -573,7 +722,14 @@ void setup()
     digitalWrite(TFT_BL, HIGH);
 
     Serial.println("[LCD] backlight ON");
-    Serial.println("[RADAR] V2.3 READY");
+    Serial.println("[RADAR] V2.4 GEO READY");
+    Serial.printf(
+        "[RADAR] center %.4f, %.4f | range %.1f NM | rotation %.0f deg\n",
+        RADAR_LAT,
+        RADAR_LON,
+        RADAR_RANGE_NM,
+        MAP_ROTATION_DEG
+    );
 
     fpsTimer = millis();
 }

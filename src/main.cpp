@@ -91,8 +91,31 @@ static const float MAP_ROTATION_DEG = 90.0f;
 static const double RADAR_LAT = 43.6584;
 static const double RADAR_LON = 7.2159;
 
-// Display range.
-static const float RADAR_RANGE_NM = 25.0f;
+// Display ranges.
+static const float RADAR_LOCAL_RANGE_NM = 19.0f;
+static const float RADAR_FINAL_RANGE_NM = 6.0f;
+
+static const unsigned long RADAR_VIEW_INTERVAL_MS = 15000UL;
+
+float currentRadarRangeNm()
+{
+    unsigned long phase =
+        (millis() / RADAR_VIEW_INTERVAL_MS) % 2UL;
+
+    return phase == 0
+        ? RADAR_LOCAL_RANGE_NM
+        : RADAR_FINAL_RANGE_NM;
+}
+
+const char* currentRadarViewName()
+{
+    unsigned long phase =
+        (millis() / RADAR_VIEW_INTERVAL_MS) % 2UL;
+
+    return phase == 0
+        ? "LOCAL"
+        : "FINAL";
+}
 
 // Network acquisition radius.
 // Slightly larger than the visible radar so aircraft approaching
@@ -141,10 +164,37 @@ struct Aircraft
     bool valid = false;
 };
 
+enum AircraftTrafficType {
+    TRAFFIC_ARRIVAL,
+    TRAFFIC_DEPARTURE,
+    TRAFFIC_UNKNOWN,
+    TRAFFIC_GROUND
+};
+
 static const int MAX_AIRCRAFT = 50;
 
 Aircraft aircraft[MAX_AIRCRAFT];
 int aircraftCount = 0;
+
+struct AircraftTrackHistory
+{
+    char hex[9] = {0};
+
+    float previousDistanceNm = 0.0f;
+    int previousAltitude = 0;
+
+    float distanceDeltaNm = 0.0f;
+    int altitudeDelta = 0;
+
+    float minDistanceNm = 999.0f;
+
+    unsigned long lastSeenMs = 0;
+    int observations = 0;
+
+    bool valid = false;
+};
+
+AircraftTrackHistory aircraftHistory[MAX_AIRCRAFT];
 
 Aircraft pendingAircraft[MAX_AIRCRAFT];
 int pendingAircraftCount = 0;
@@ -299,11 +349,14 @@ bool aircraftToScreen(
     if (!ac.valid)
         return false;
 
-    if (ac.distanceNm > RADAR_RANGE_NM)
+    float radarRangeNm =
+        currentRadarRangeNm();
+
+    if (ac.distanceNm > radarRangeNm)
         return false;
 
     float radius =
-        (ac.distanceNm / RADAR_RANGE_NM) *
+        (ac.distanceNm / radarRangeNm) *
         RADAR_R;
 
     polarToScreen(
@@ -901,6 +954,9 @@ void startAircraftNetworkTask()
     }
 }
 
+void updateAircraftHistory(const Aircraft& ac);
+AircraftTrafficType classifyAircraftTraffic(const Aircraft& ac);
+
 bool applyPendingAircraft()
 {
     if (
@@ -933,6 +989,10 @@ bool applyPendingAircraft()
         ) {
             aircraft[i] =
                 pendingAircraft[i];
+
+            updateAircraftHistory(
+                aircraft[i]
+            );
         }
 
         pendingAircraftReady =
@@ -941,9 +1001,31 @@ bool applyPendingAircraft()
         lastAircraftUpdateMs =
             millis();
 
+        int arrCount = 0;
+        int depCount = 0;
+        int unkCount = 0;
+
+        for (int i = 0; i < aircraftCount; i++) {
+            AircraftTrafficType traffic =
+                classifyAircraftTraffic(aircraft[i]);
+
+            if (traffic == TRAFFIC_ARRIVAL) {
+                arrCount++;
+            }
+            else if (traffic == TRAFFIC_DEPARTURE) {
+                depCount++;
+            }
+            else if (traffic == TRAFFIC_UNKNOWN) {
+                unkCount++;
+            }
+        }
+
         Serial.printf(
-            "[RADAR] snapshot applied: %d aircraft\n",
-            aircraftCount
+            "[RADAR] AC %d | ARR %d | DEP %d | UNK %d\n",
+            aircraftCount,
+            arrCount,
+            depCount,
+            unkCount
         );
     }
 
@@ -1014,6 +1096,283 @@ void connectWiFi()
         WiFi.RSSI()
     );
 }
+
+// ============================================================
+// AIRCRAFT TRACK HISTORY + TRAFFIC CLASSIFICATION
+// ============================================================
+
+AircraftTrackHistory* findAircraftHistory(const char* hex)
+{
+    if (hex == nullptr || hex[0] == '\0') {
+        return nullptr;
+    }
+
+    for (int i = 0; i < MAX_AIRCRAFT; i++) {
+        if (
+            aircraftHistory[i].valid &&
+            strcmp(aircraftHistory[i].hex, hex) == 0
+        ) {
+            return &aircraftHistory[i];
+        }
+    }
+
+    return nullptr;
+}
+
+AircraftTrackHistory* getAircraftHistory(const char* hex)
+{
+    AircraftTrackHistory* existing =
+        findAircraftHistory(hex);
+
+    if (existing != nullptr) {
+        return existing;
+    }
+
+    for (int i = 0; i < MAX_AIRCRAFT; i++) {
+        if (!aircraftHistory[i].valid) {
+
+            memset(
+                &aircraftHistory[i],
+                0,
+                sizeof(AircraftTrackHistory)
+            );
+
+            strncpy(
+                aircraftHistory[i].hex,
+                hex,
+                sizeof(aircraftHistory[i].hex) - 1
+            );
+
+            aircraftHistory[i].minDistanceNm = 999.0f;
+            aircraftHistory[i].valid = true;
+
+            return &aircraftHistory[i];
+        }
+    }
+
+    int oldestIndex = 0;
+
+    for (int i = 1; i < MAX_AIRCRAFT; i++) {
+        if (
+            aircraftHistory[i].lastSeenMs <
+            aircraftHistory[oldestIndex].lastSeenMs
+        ) {
+            oldestIndex = i;
+        }
+    }
+
+    memset(
+        &aircraftHistory[oldestIndex],
+        0,
+        sizeof(AircraftTrackHistory)
+    );
+
+    strncpy(
+        aircraftHistory[oldestIndex].hex,
+        hex,
+        sizeof(aircraftHistory[oldestIndex].hex) - 1
+    );
+
+    aircraftHistory[oldestIndex].minDistanceNm = 999.0f;
+    aircraftHistory[oldestIndex].valid = true;
+
+    return &aircraftHistory[oldestIndex];
+}
+
+void updateAircraftHistory(const Aircraft& ac)
+{
+    if (!ac.valid || ac.hex[0] == '\0') {
+        return;
+    }
+
+    AircraftTrackHistory* h =
+        getAircraftHistory(ac.hex);
+
+    if (h == nullptr) {
+        return;
+    }
+
+    if (h->observations > 0) {
+
+        h->distanceDeltaNm =
+            ac.distanceNm -
+            h->previousDistanceNm;
+
+        h->altitudeDelta =
+            ac.altitude -
+            h->previousAltitude;
+    }
+
+    h->previousDistanceNm =
+        ac.distanceNm;
+
+    h->previousAltitude =
+        ac.altitude;
+
+    if (ac.distanceNm < h->minDistanceNm) {
+        h->minDistanceNm =
+            ac.distanceNm;
+    }
+
+    h->observations++;
+    h->lastSeenMs = millis();
+}
+
+AircraftTrafficType classifyAircraftTraffic(
+    const Aircraft& ac
+)
+{
+    if (!ac.valid) {
+        return TRAFFIC_UNKNOWN;
+    }
+
+    if (ac.onGround) {
+        return TRAFFIC_GROUND;
+    }
+
+    if (ac.distanceNm > 35.0f) {
+        return TRAFFIC_UNKNOWN;
+    }
+
+    float bearingToNice =
+        ac.bearing + 180.0f;
+
+    if (bearingToNice >= 360.0f) {
+        bearingToNice -= 360.0f;
+    }
+
+    float headingDelta =
+        fabsf(
+            ac.heading -
+            bearingToNice
+        );
+
+    if (headingDelta > 180.0f) {
+        headingDelta =
+            360.0f -
+            headingDelta;
+    }
+
+    bool headingTowardNice =
+        headingDelta <= 65.0f;
+
+    bool headingAwayFromNice =
+        headingDelta >= 115.0f;
+
+    bool descending =
+        ac.verticalRate <= -250;
+
+    bool climbing =
+        ac.verticalRate >= 250;
+
+    AircraftTrackHistory* h =
+        findAircraftHistory(ac.hex);
+
+    bool historyReady =
+        h != nullptr &&
+        h->observations >= 2;
+
+    bool gettingCloser = false;
+    bool gettingFarther = false;
+    bool altitudeDropping = false;
+    bool altitudeIncreasing = false;
+    bool originatedNearNice = false;
+
+    if (historyReady) {
+
+        gettingCloser =
+            h->distanceDeltaNm <= -0.03f;
+
+        gettingFarther =
+            h->distanceDeltaNm >= 0.03f;
+
+        altitudeDropping =
+            h->altitudeDelta <= -100;
+
+        altitudeIncreasing =
+            h->altitudeDelta >= 100;
+
+        originatedNearNice =
+            h->minDistanceNm <= 3.5f;
+    }
+
+    // Departure observed near NCE then moving away.
+    if (
+        historyReady &&
+        originatedNearNice &&
+        gettingFarther &&
+        (
+            altitudeIncreasing ||
+            climbing ||
+            headingAwayFromNice
+        )
+    ) {
+        return TRAFFIC_DEPARTURE;
+    }
+
+    // Departure still close to NCE.
+    if (
+        ac.distanceNm <= 8.0f &&
+        headingAwayFromNice &&
+        (
+            climbing ||
+            (
+                historyReady &&
+                gettingFarther
+            )
+        )
+    ) {
+        return TRAFFIC_DEPARTURE;
+    }
+
+    // Arrival converging toward NCE.
+    if (
+        historyReady &&
+        gettingCloser &&
+        headingTowardNice &&
+        (
+            altitudeDropping ||
+            descending ||
+            ac.altitude <= 6000
+        )
+    ) {
+        return TRAFFIC_ARRIVAL;
+    }
+
+    if (
+        historyReady &&
+        ac.distanceNm <= 6.0f &&
+        gettingCloser &&
+        ac.altitude <= 5000 &&
+        !headingAwayFromNice
+    ) {
+        return TRAFFIC_ARRIVAL;
+    }
+
+    // Conservative fallback before history is available.
+    if (!historyReady) {
+
+        if (
+            ac.distanceNm <= 12.0f &&
+            headingTowardNice &&
+            descending &&
+            ac.altitude <= 8000
+        ) {
+            return TRAFFIC_ARRIVAL;
+        }
+
+        if (
+            ac.distanceNm <= 5.0f &&
+            headingAwayFromNice &&
+            climbing
+        ) {
+            return TRAFFIC_DEPARTURE;
+        }
+    }
+
+    return TRAFFIC_UNKNOWN;
+}
+
 
 // ============================================================
 // AIRCRAFT DRAWING
@@ -1101,11 +1460,24 @@ void drawAircraft()
 
         visibleCount++;
 
+        AircraftTrafficType traffic =
+            classifyAircraftTraffic(ac);
+
+        uint16_t aircraftColor =
+            COL_GRID_DIM;
+
+        if (traffic == TRAFFIC_ARRIVAL) {
+            aircraftColor = COL_SWEEP;
+        }
+        else if (traffic == TRAFFIC_DEPARTURE) {
+            aircraftColor = COL_AIRCRAFT;
+        }
+
         drawAircraftSymbol(
             x,
             y,
             ac.heading,
-            COL_AIRCRAFT
+            aircraftColor
         );
 
         String label;
@@ -1309,8 +1681,9 @@ void drawHeader()
     );
 
     gfx->printf(
-        "%.0f NM",
-        RADAR_RANGE_NM
+        "%s %.0f NM",
+        currentRadarViewName(),
+        currentRadarRangeNm()
     );
 }
 
@@ -1382,7 +1755,7 @@ void drawFooter()
             aircraft[i].valid &&
             !aircraft[i].onGround &&
             aircraft[i].distanceNm <=
-                RADAR_RANGE_NM
+                currentRadarRangeNm()
         ) {
             visible++;
         }
@@ -1724,8 +2097,9 @@ void setup()
     );
 
     Serial.printf(
-        "[RADAR] display %.1f NM / API %d NM\n",
-        RADAR_RANGE_NM,
+        "[RADAR] views LOCAL %.1f NM / FINAL %.1f NM / API %d NM\n",
+        RADAR_LOCAL_RANGE_NM,
+        RADAR_FINAL_RANGE_NM,
         API_RADIUS_NM
     );
 

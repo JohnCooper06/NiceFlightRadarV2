@@ -1,52 +1,53 @@
 # NiceFlightRadar V2
 
-Second generation of the NiceFlightRadar embedded flight tracker.
+NiceFlightRadar V2 is a personal, non-commercial flight radar project built around an ESP32-S3.
 
-## Hardware target
+The goal is to create a small standalone physical radar displaying live aircraft traffic around Nice Côte d'Azur Airport (NCE / LFMN).
 
-- ESP32-S3
-- 8 MB PSRAM
-- 16 MB Flash
-- 480x480 IPS display
-- Touchscreen
-- Wi-Fi
-- Bluetooth
-
-## Goal
-
-Rebuild the original NiceFlightRadar project on a significantly more
-capable hardware platform while retaining the features developed in V1.
-
-Planned features include:
-
-- Real-time aircraft radar
-- Aircraft arrivals / departures
-- Aircraft touch selection
-- Multiple radar ranges
-- Rotated radar orientation
-- Aircraft route information
-- Nice Airport integration
-- Wind / METAR information
-- Weather information
-- Radar sweep animation
-- Touch UI
-- Future graphical improvements enabled by PSRAM
-
-## Development strategy
-
-V2 starts from a clean hardware baseline.
-
-The original V1 code will not be copied wholesale. Features will be
-ported incrementally after the ESP32-S3, PSRAM, display and touchscreen
-have been validated.
-
-## Current milestone
-
-Hardware Probe V2.0
-
-Validation of:
+## Hardware
 
 - ESP32-S3
 - 16 MB Flash
 - 8 MB PSRAM
-- external PSRAM allocation
+- 480 × 480 IPS display
+- ST7701 display controller
+- GT911 capacitive touchscreen
+
+## Current features
+
+- 480 × 480 radar display
+- Double-buffered rendering using PSRAM
+- Geographic aircraft projection
+- Animated radar sweep
+- Capacitive touchscreen support
+- Wi-Fi connectivity
+- Live ADS-B integration in development
+
+## Radar area
+
+The project is centered around Nice Côte d'Azur Airport in southern France.
+
+The radar software converts real aircraft latitude/longitude positions into bearing, distance and screen coordinates.
+
+## Project status
+
+NiceFlightRadar V2 is currently under active development.
+
+This is a hobby project only.
+
+It is:
+
+- non-commercial
+- not monetized
+- not offered as a public flight tracking service
+- primarily used by its developer for experimentation and learning
+
+## Data sources
+
+The project experiments with public ADS-B data sources.
+
+API credentials, Wi-Fi credentials and other private configuration are intentionally excluded from this repository.
+
+## License
+
+Personal experimental project. Licensing information may be added later.

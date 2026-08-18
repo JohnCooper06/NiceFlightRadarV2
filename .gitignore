@@ -5,3 +5,6 @@
 *.bak
 *.tmp
 *.log
+include/secrets.h
+src/secrets.h
+*.backup*

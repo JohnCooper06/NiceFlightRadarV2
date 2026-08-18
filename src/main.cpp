@@ -111,8 +111,9 @@ static const int RADAR_CX = 240;
 static const int RADAR_CY = 245;
 static const int RADAR_R  = 215;
 
-// Keep the orientation currently validated on V2.
-static const float MAP_ROTATION_DEG = 90.0f;
+// Map orientation aligned with the physical view from HOME.
+// Value validated on NiceFlightRadar V1.
+static const float MAP_ROTATION_DEG = 180.0f;
 
 // Nice Côte d'Azur / LFMN.
 static const double RADAR_LAT = 43.6584;
@@ -477,6 +478,168 @@ void polarToScreen(
             sinf(angle) *
             radius
         );
+}
+
+float geoDistanceNm(
+    double lat1,
+    double lon1,
+    double lat2,
+    double lon2
+)
+{
+    const double DEG_TO_RAD_D =
+        0.017453292519943295;
+
+    double phi1 =
+        lat1 * DEG_TO_RAD_D;
+
+    double phi2 =
+        lat2 * DEG_TO_RAD_D;
+
+    double dPhi =
+        (lat2 - lat1) *
+        DEG_TO_RAD_D;
+
+    double dLambda =
+        (lon2 - lon1) *
+        DEG_TO_RAD_D;
+
+    double a =
+        sin(dPhi / 2.0) *
+        sin(dPhi / 2.0) +
+        cos(phi1) *
+        cos(phi2) *
+        sin(dLambda / 2.0) *
+        sin(dLambda / 2.0);
+
+    double c =
+        2.0 *
+        atan2(
+            sqrt(a),
+            sqrt(1.0 - a)
+        );
+
+    // Earth radius in nautical miles.
+    return
+        (float)(
+            3440.065 * c
+        );
+}
+
+float geoBearingDeg(
+    double lat1,
+    double lon1,
+    double lat2,
+    double lon2
+)
+{
+    const double DEG_TO_RAD_D =
+        0.017453292519943295;
+
+    const double RAD_TO_DEG_D =
+        57.29577951308232;
+
+    double phi1 =
+        lat1 * DEG_TO_RAD_D;
+
+    double phi2 =
+        lat2 * DEG_TO_RAD_D;
+
+    double dLambda =
+        (lon2 - lon1) *
+        DEG_TO_RAD_D;
+
+    double y =
+        sin(dLambda) *
+        cos(phi2);
+
+    double x =
+        cos(phi1) *
+        sin(phi2) -
+        sin(phi1) *
+        cos(phi2) *
+        cos(dLambda);
+
+    double bearing =
+        atan2(y, x) *
+        RAD_TO_DEG_D;
+
+    bearing =
+        fmod(
+            bearing + 360.0,
+            360.0
+        );
+
+    return
+        (float)bearing;
+}
+
+bool homeToScreen(
+    int &x,
+    int &y
+)
+{
+    static bool calculated =
+        false;
+
+    static float homeDistanceNm =
+        0.0f;
+
+    static float homeBearingDeg =
+        0.0f;
+
+    if (!calculated) {
+        homeDistanceNm =
+            geoDistanceNm(
+                RADAR_LAT,
+                RADAR_LON,
+                HOME_LAT,
+                HOME_LON
+            );
+
+        homeBearingDeg =
+            geoBearingDeg(
+                RADAR_LAT,
+                RADAR_LON,
+                HOME_LAT,
+                HOME_LON
+            );
+
+        calculated =
+            true;
+
+        Serial.printf(
+            "[HOME] distance %.2f NM | bearing %.1f deg\n",
+            homeDistanceNm,
+            homeBearingDeg
+        );
+    }
+
+    float radarRangeNm =
+        currentRadarRangeNm();
+
+    if (
+        homeDistanceNm >
+        radarRangeNm
+    ) {
+        return false;
+    }
+
+    float radius =
+        (
+            homeDistanceNm /
+            radarRangeNm
+        ) *
+        RADAR_R;
+
+    polarToScreen(
+        homeBearingDeg,
+        radius,
+        x,
+        y
+    );
+
+    return true;
 }
 
 bool aircraftToScreen(
@@ -1978,6 +2141,72 @@ void drawHeader()
     );
 }
 
+void drawHome()
+{
+    int x;
+    int y;
+
+    if (
+        !homeToScreen(
+            x,
+            y
+        )
+    ) {
+        return;
+    }
+
+    // V1 style: magenta marker with white center.
+    gfx->fillCircle(
+        x,
+        y,
+        6,
+        0xF81F
+    );
+
+    gfx->fillCircle(
+        x,
+        y,
+        2,
+        0xFFFF
+    );
+
+    gfx->setTextColor(
+        0xF81F
+    );
+
+    gfx->setTextSize(1);
+
+    int labelX =
+        x + 9;
+
+    int labelY =
+        y - 4;
+
+    if (
+        labelX >
+        SCREEN_W - 38
+    ) {
+        labelX =
+            x - 34;
+    }
+
+    if (
+        labelY < 28
+    ) {
+        labelY =
+            y + 8;
+    }
+
+    gfx->setCursor(
+        labelX,
+        labelY
+    );
+
+    gfx->print(
+        "HOME"
+    );
+}
+
 void drawAirport()
 {
     gfx->fillCircle(
@@ -2344,6 +2573,7 @@ void drawFrame()
     drawCompass();
     drawHeader();
     drawAirport();
+    drawHome();
 
     drawAircraft();
 

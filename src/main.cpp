@@ -3,6 +3,7 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include <Preferences.h>
 #include <Arduino_GFX_Library.h>
 #include <math.h>
 
@@ -33,7 +34,33 @@
 
 #define TOUCH_SDA 19
 #define TOUCH_SCL 45
-#define GT911_ADDR 0x5D
+uint8_t gt911Address = 0x5D;
+
+bool detectGT911()
+{
+    const uint8_t addresses[] = {0x5D, 0x14};
+
+    for (uint8_t addr : addresses) {
+        Wire.beginTransmission(addr);
+
+        if (Wire.endTransmission() == 0) {
+            gt911Address = addr;
+
+            Serial.printf(
+                "[TOUCH] GT911 detected at 0x%02X\n",
+                gt911Address
+            );
+
+            return true;
+        }
+    }
+
+    Serial.println(
+        "[TOUCH] GT911 NOT FOUND"
+    );
+
+    return false;
+}
 
 // ============================================================
 // DISPLAY HARDWARE
@@ -97,24 +124,136 @@ static const float RADAR_FINAL_RANGE_NM = 6.0f;
 
 static const unsigned long RADAR_VIEW_INTERVAL_MS = 15000UL;
 
-float currentRadarRangeNm()
+enum RadarViewMode
+{
+    RADAR_VIEW_AUTO,
+    RADAR_VIEW_LOCAL,
+    RADAR_VIEW_FINAL
+};
+
+RadarViewMode radarViewMode =
+    RADAR_VIEW_AUTO;
+
+enum AppPage
+{
+    PAGE_RADAR,
+    PAGE_SETTINGS
+};
+
+AppPage currentPage =
+    PAGE_RADAR;
+
+Preferences preferences;
+
+void saveRadarViewMode()
+{
+    preferences.putUChar(
+        "radarMode",
+        static_cast<uint8_t>(
+            radarViewMode
+        )
+    );
+
+    Serial.printf(
+        "[SETTINGS] saved radar mode %u\n",
+        static_cast<unsigned>(
+            radarViewMode
+        )
+    );
+}
+
+void loadRadarViewMode()
+{
+    uint8_t saved =
+        preferences.getUChar(
+            "radarMode",
+            static_cast<uint8_t>(
+                RADAR_VIEW_AUTO
+            )
+        );
+
+    if (
+        saved >
+        static_cast<uint8_t>(
+            RADAR_VIEW_FINAL
+        )
+    ) {
+        saved =
+            static_cast<uint8_t>(
+                RADAR_VIEW_AUTO
+            );
+    }
+
+    radarViewMode =
+        static_cast<RadarViewMode>(
+            saved
+        );
+
+    Serial.printf(
+        "[SETTINGS] loaded radar mode %u\n",
+        static_cast<unsigned>(
+            radarViewMode
+        )
+    );
+}
+
+bool autoRadarIsLocal()
 {
     unsigned long phase =
         (millis() / RADAR_VIEW_INTERVAL_MS) % 2UL;
 
-    return phase == 0
+    return phase == 0;
+}
+
+float currentRadarRangeNm()
+{
+    if (radarViewMode == RADAR_VIEW_LOCAL) {
+        return RADAR_LOCAL_RANGE_NM;
+    }
+
+    if (radarViewMode == RADAR_VIEW_FINAL) {
+        return RADAR_FINAL_RANGE_NM;
+    }
+
+    return autoRadarIsLocal()
         ? RADAR_LOCAL_RANGE_NM
         : RADAR_FINAL_RANGE_NM;
 }
 
 const char* currentRadarViewName()
 {
-    unsigned long phase =
-        (millis() / RADAR_VIEW_INTERVAL_MS) % 2UL;
+    if (radarViewMode == RADAR_VIEW_LOCAL) {
+        return "LOCAL";
+    }
 
-    return phase == 0
-        ? "LOCAL"
-        : "FINAL";
+    if (radarViewMode == RADAR_VIEW_FINAL) {
+        return "FINAL";
+    }
+
+    return autoRadarIsLocal()
+        ? "AUTO L"
+        : "AUTO F";
+}
+
+void cycleRadarViewMode()
+{
+    if (radarViewMode == RADAR_VIEW_AUTO) {
+        radarViewMode = RADAR_VIEW_LOCAL;
+    }
+    else if (radarViewMode == RADAR_VIEW_LOCAL) {
+        radarViewMode = RADAR_VIEW_FINAL;
+    }
+    else {
+        radarViewMode = RADAR_VIEW_AUTO;
+    }
+
+    saveRadarViewMode();
+
+    Serial.printf(
+        "[RADAR] view mode -> %s %.0f NM\n",
+        currentRadarViewName(),
+        currentRadarRangeNm()
+    );
 }
 
 // Network acquisition radius.
@@ -380,7 +519,7 @@ bool gt911Read(
 )
 {
     Wire.beginTransmission(
-        GT911_ADDR
+        gt911Address
     );
 
     Wire.write(
@@ -400,7 +539,7 @@ bool gt911Read(
 
     if (
         Wire.requestFrom(
-            (uint8_t)GT911_ADDR,
+            (uint8_t)gt911Address,
             len
         ) != len
     ) {
@@ -422,7 +561,7 @@ bool gt911Read(
 void gt911ClearStatus()
 {
     Wire.beginTransmission(
-        GT911_ADDR
+        gt911Address
     );
 
     Wire.write(0x81);
@@ -430,6 +569,152 @@ void gt911ClearStatus()
     Wire.write((uint8_t)0);
 
     Wire.endTransmission();
+}
+
+void handleTouchAction(
+    uint16_t x,
+    uint16_t y
+)
+{
+    static uint32_t lastActionMs = 0;
+
+    if (
+        millis() -
+        lastActionMs <
+        400
+    ) {
+        return;
+    }
+
+    // --------------------------------------------------------
+    // SETTINGS PAGE
+    // --------------------------------------------------------
+
+    if (
+        currentPage ==
+        PAGE_SETTINGS
+    ) {
+        // BACK
+        if (
+            x <= 110 &&
+            y <= 65
+        ) {
+            currentPage =
+                PAGE_RADAR;
+
+            lastActionMs =
+                millis();
+
+            Serial.println(
+                "[UI] SETTINGS -> RADAR"
+            );
+
+            return;
+        }
+
+        // AUTO
+        if (
+            x >= 60 &&
+            x <= 420 &&
+            y >= 120 &&
+            y <= 190
+        ) {
+            radarViewMode =
+                RADAR_VIEW_AUTO;
+
+            saveRadarViewMode();
+
+            lastActionMs =
+                millis();
+
+            Serial.println(
+                "[SETTINGS] radar mode AUTO"
+            );
+
+            return;
+        }
+
+        // LOCAL
+        if (
+            x >= 60 &&
+            x <= 420 &&
+            y >= 215 &&
+            y <= 285
+        ) {
+            radarViewMode =
+                RADAR_VIEW_LOCAL;
+
+            saveRadarViewMode();
+
+            lastActionMs =
+                millis();
+
+            Serial.println(
+                "[SETTINGS] radar mode LOCAL 19 NM"
+            );
+
+            return;
+        }
+
+        // FINAL
+        if (
+            x >= 60 &&
+            x <= 420 &&
+            y >= 310 &&
+            y <= 380
+        ) {
+            radarViewMode =
+                RADAR_VIEW_FINAL;
+
+            saveRadarViewMode();
+
+            lastActionMs =
+                millis();
+
+            Serial.println(
+                "[SETTINGS] radar mode FINAL 6 NM"
+            );
+
+            return;
+        }
+
+        return;
+    }
+
+    // --------------------------------------------------------
+    // RADAR PAGE
+    // --------------------------------------------------------
+
+    // SETTINGS button - bottom-right.
+    if (
+        x >= 395 &&
+        y >= 425
+    ) {
+        currentPage =
+            PAGE_SETTINGS;
+
+        lastActionMs =
+            millis();
+
+        Serial.println(
+            "[UI] RADAR -> SETTINGS"
+        );
+
+        return;
+    }
+
+    // Existing quick range selector - top-right.
+    if (
+        x >= 330 &&
+        y <= 70
+    ) {
+        cycleRadarViewMode();
+
+        lastActionMs =
+            millis();
+
+        return;
+    }
 }
 
 void readTouch()
@@ -495,6 +780,12 @@ void readTouch()
                         x,
                         y
                     );
+
+                    handleTouchAction(
+                        x,
+                        y
+                    );
+
                 }
             }
         }
@@ -1843,11 +2134,208 @@ void drawSweep()
 }
 
 // ============================================================
+// SETTINGS PAGE
+// ============================================================
+
+void drawSettingsButton(
+    int x,
+    int y,
+    int w,
+    int h,
+    const char* label,
+    bool selected
+)
+{
+    if (selected) {
+        // Selected: filled radar green + white text.
+        gfx->fillRoundRect(
+            x,
+            y,
+            w,
+            h,
+            8,
+            COL_SWEEP
+        );
+
+        gfx->setTextColor(
+            0xFFFF
+        );
+    }
+    else {
+        // Unselected: black background + radar outline.
+        gfx->fillRoundRect(
+            x,
+            y,
+            w,
+            h,
+            8,
+            COL_BG
+        );
+
+        gfx->drawRoundRect(
+            x,
+            y,
+            w,
+            h,
+            8,
+            COL_GRID
+        );
+
+        gfx->setTextColor(
+            COL_GRID
+        );
+    }
+
+    gfx->setTextSize(2);
+
+    int textWidth =
+        strlen(label) * 12;
+
+    gfx->setCursor(
+        x +
+        (w - textWidth) / 2,
+        y + 25
+    );
+
+    gfx->print(
+        label
+    );
+}
+
+void drawSettingsPage()
+{
+    gfx->fillScreen(
+        COL_BG
+    );
+
+    // Header
+    gfx->setTextColor(
+        COL_SWEEP
+    );
+
+    gfx->setTextSize(2);
+
+    gfx->setCursor(
+        170,
+        24
+    );
+
+    gfx->print(
+        "SETTINGS"
+    );
+
+    // BACK
+    gfx->drawRoundRect(
+        12,
+        12,
+        90,
+        45,
+        6,
+        COL_GRID
+    );
+
+    gfx->setTextColor(
+        COL_TEXT
+    );
+
+    gfx->setTextSize(1);
+
+    gfx->setCursor(
+        34,
+        30
+    );
+
+    gfx->print(
+        "< BACK"
+    );
+
+    gfx->setTextColor(
+        COL_TEXT
+    );
+
+    gfx->setTextSize(1);
+
+    gfx->setCursor(
+        60,
+        92
+    );
+
+    gfx->print(
+        "DEFAULT RADAR VIEW"
+    );
+
+    drawSettingsButton(
+        60,
+        120,
+        360,
+        70,
+        "AUTO",
+        radarViewMode ==
+            RADAR_VIEW_AUTO
+    );
+
+    drawSettingsButton(
+        60,
+        215,
+        360,
+        70,
+        "LOCAL 19 NM",
+        radarViewMode ==
+            RADAR_VIEW_LOCAL
+    );
+
+    drawSettingsButton(
+        60,
+        310,
+        360,
+        70,
+        "FINAL 6 NM",
+        radarViewMode ==
+            RADAR_VIEW_FINAL
+    );
+
+    gfx->setTextColor(
+        COL_GRID_DIM
+    );
+
+    gfx->setTextSize(1);
+
+    gfx->setCursor(
+        60,
+        410
+    );
+
+    gfx->print(
+        "AUTO SWITCH: 15 SEC"
+    );
+
+    gfx->setCursor(
+        60,
+        430
+    );
+
+    gfx->print(
+        "ADS-B ACQUISITION: 40 NM"
+    );
+
+    gfx->flush();
+}
+
+
+// ============================================================
 // FRAME
 // ============================================================
 
 void drawFrame()
 {
+    if (
+        currentPage ==
+        PAGE_SETTINGS
+    ) {
+        drawSettingsPage();
+        return;
+    }
+
     gfx->fillScreen(
         COL_BG
     );
@@ -1861,6 +2349,40 @@ void drawFrame()
 
     drawSweep();
     drawFooter();
+
+    // SETTINGS shortcut.
+    gfx->fillRoundRect(
+        405,
+        432,
+        65,
+        30,
+        5,
+        COL_BG
+    );
+
+    gfx->drawRoundRect(
+        405,
+        432,
+        65,
+        30,
+        5,
+        COL_GRID
+    );
+
+    gfx->setTextColor(
+        COL_TEXT
+    );
+
+    gfx->setTextSize(1);
+
+    gfx->setCursor(
+        424,
+        443
+    );
+
+    gfx->print(
+        "SET"
+    );
 
     gfx->flush();
 }
@@ -1938,6 +2460,13 @@ void setup()
         " NiceFlightRadar V2.5"
     );
 
+    preferences.begin(
+        "nfradar",
+        false
+    );
+
+    loadRadarViewMode();
+
     Serial.println(
         " LIVE ADS-B"
     );
@@ -1965,6 +2494,8 @@ void setup()
     Wire.setClock(
         400000
     );
+
+    detectGT911();
 
     pinMode(
         TFT_BL,

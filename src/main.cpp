@@ -4,6 +4,7 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
+#include <time.h>
 #include <Arduino_GFX_Library.h>
 #include <math.h>
 
@@ -138,6 +139,8 @@ RadarViewMode radarViewMode =
 enum AppPage
 {
     PAGE_RADAR,
+    PAGE_ARRIVALS,
+    PAGE_DEPARTURES,
     PAGE_SETTINGS
 };
 
@@ -734,6 +737,16 @@ void gt911ClearStatus()
     Wire.endTransmission();
 }
 
+// Airport board state used by touch navigation.
+// Definitions are provided by airport_boards.h later in this file.
+extern int airportArrivalPage;
+extern int airportDeparturePage;
+extern volatile int airportArrivalCount;
+extern volatile int airportDepartureCount;
+
+static constexpr int AIRPORT_TOUCH_VISIBLE = 7;
+
+
 void handleTouchAction(
     uint16_t x,
     uint16_t y
@@ -749,9 +762,10 @@ void handleTouchAction(
         return;
     }
 
-    // --------------------------------------------------------
+
+    // ========================================================
     // SETTINGS PAGE
-    // --------------------------------------------------------
+    // ========================================================
 
     if (
         currentPage ==
@@ -844,9 +858,216 @@ void handleTouchAction(
         return;
     }
 
-    // --------------------------------------------------------
+
+    // ========================================================
+    // ARRIVALS / DEPARTURES
+    // ========================================================
+
+    if (
+        currentPage == PAGE_ARRIVALS ||
+        currentPage == PAGE_DEPARTURES
+    ) {
+        // ----------------------------------------------------
+        // Navigation principale du bas
+        //
+        // RADAR | ARR | DEP | SET
+        // ----------------------------------------------------
+
+        if (
+            y >= 435
+        ) {
+            if (x < 120) {
+                currentPage =
+                    PAGE_RADAR;
+
+                Serial.println(
+                    "[UI] BOARD -> RADAR"
+                );
+            }
+            else if (x < 240) {
+                currentPage =
+                    PAGE_ARRIVALS;
+
+                Serial.println(
+                    "[UI] -> ARRIVALS"
+                );
+            }
+            else if (x < 360) {
+                currentPage =
+                    PAGE_DEPARTURES;
+
+                Serial.println(
+                    "[UI] -> DEPARTURES"
+                );
+            }
+            else {
+                currentPage =
+                    PAGE_SETTINGS;
+
+                Serial.println(
+                    "[UI] BOARD -> SETTINGS"
+                );
+            }
+
+            lastActionMs =
+                millis();
+
+            return;
+        }
+
+
+        // ----------------------------------------------------
+        // PREVIOUS PAGE
+        // ----------------------------------------------------
+
+        if (
+            y >= 395 &&
+            y < 435 &&
+            x <= 120
+        ) {
+            if (
+                currentPage == PAGE_ARRIVALS &&
+                airportArrivalPage > 0
+            ) {
+                airportArrivalPage--;
+            }
+
+            if (
+                currentPage == PAGE_DEPARTURES &&
+                airportDeparturePage > 0
+            ) {
+                airportDeparturePage--;
+            }
+
+            lastActionMs =
+                millis();
+
+            Serial.println(
+                "[UI] BOARD PREV"
+            );
+
+            return;
+        }
+
+
+        // ----------------------------------------------------
+        // NEXT PAGE
+        // ----------------------------------------------------
+
+        if (
+            y >= 395 &&
+            y < 435 &&
+            x >= 360
+        ) {
+            if (
+                currentPage ==
+                PAGE_ARRIVALS
+            ) {
+                int pageCount =
+                    (
+                        airportArrivalCount +
+                        AIRPORT_TOUCH_VISIBLE - 1
+                    ) /
+                    AIRPORT_TOUCH_VISIBLE;
+
+                if (pageCount < 1)
+                    pageCount = 1;
+
+                if (
+                    airportArrivalPage <
+                    pageCount - 1
+                ) {
+                    airportArrivalPage++;
+                }
+            }
+
+            if (
+                currentPage ==
+                PAGE_DEPARTURES
+            ) {
+                int pageCount =
+                    (
+                        airportDepartureCount +
+                        AIRPORT_TOUCH_VISIBLE - 1
+                    ) /
+                    AIRPORT_TOUCH_VISIBLE;
+
+                if (pageCount < 1)
+                    pageCount = 1;
+
+                if (
+                    airportDeparturePage <
+                    pageCount - 1
+                ) {
+                    airportDeparturePage++;
+                }
+            }
+
+            lastActionMs =
+                millis();
+
+            Serial.println(
+                "[UI] BOARD NEXT"
+            );
+
+            return;
+        }
+
+        return;
+    }
+
+
+    // ========================================================
     // RADAR PAGE
-    // --------------------------------------------------------
+    // ========================================================
+
+    // ARR button
+    //
+    // Drawing:
+    // x = 6..74
+    // y = 432..462
+    if (
+        x >= 0 &&
+        x <= 78 &&
+        y >= 425
+    ) {
+        currentPage =
+            PAGE_ARRIVALS;
+
+        lastActionMs =
+            millis();
+
+        Serial.println(
+            "[UI] RADAR -> ARRIVALS"
+        );
+
+        return;
+    }
+
+
+    // DEP button
+    //
+    // Drawing:
+    // x = 82..150
+    // y = 432..462
+    if (
+        x >= 80 &&
+        x <= 160 &&
+        y >= 425
+    ) {
+        currentPage =
+            PAGE_DEPARTURES;
+
+        lastActionMs =
+            millis();
+
+        Serial.println(
+            "[UI] RADAR -> DEPARTURES"
+        );
+
+        return;
+    }
+
 
     // SETTINGS button - bottom-right.
     if (
@@ -865,6 +1086,7 @@ void handleTouchAction(
 
         return;
     }
+
 
     // Existing quick range selector - top-right.
     if (
@@ -990,6 +1212,8 @@ void safeCopy(
         destinationSize - 1
     ] = '\0';
 }
+
+#include "airport_boards.h"
 
 bool fetchAircraftNetwork()
 {
@@ -1345,6 +1569,8 @@ void aircraftNetworkTask(
     for (;;)
     {
         fetchAircraftNetwork();
+
+        updateAirportBoardsNetwork();
 
         vTaskDelay(
             pdMS_TO_TICKS(
@@ -2559,6 +2785,22 @@ void drawFrame()
 {
     if (
         currentPage ==
+        PAGE_ARRIVALS
+    ) {
+        drawArrivalsPage();
+        return;
+    }
+
+    if (
+        currentPage ==
+        PAGE_DEPARTURES
+    ) {
+        drawDeparturesPage();
+        return;
+    }
+
+    if (
+        currentPage ==
         PAGE_SETTINGS
     ) {
         drawSettingsPage();
@@ -2579,6 +2821,8 @@ void drawFrame()
 
     drawSweep();
     drawFooter();
+
+    drawRadarBoardButtons();
 
     // SETTINGS shortcut.
     gfx->fillRoundRect(
@@ -2849,6 +3093,8 @@ void setup()
 
     connectWiFi();
 
+    initAirportBoards();
+
     startAircraftNetworkTask();
 
     Serial.printf(
@@ -2881,6 +3127,8 @@ void loop()
     readTouch();
 
     applyPendingAircraft();
+
+    purgeExpiredAirportBoards();
 
     drawFrame();
 

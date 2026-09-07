@@ -265,6 +265,14 @@ void cycleRadarViewMode()
 // the edge are already present in the snapshot.
 static const int API_RADIUS_NM = 40;
 
+// Primary ADS-B source:
+// local Raspberry Pi 5 + readsb.
+static const char* LOCAL_ADSB_URL =
+    "http://192.168.1.49:8088/aircraft";
+
+static const uint32_t LOCAL_ADSB_TIMEOUT_MS =
+    2500;
+
 static const double EARTH_RADIUS_NM = 3440.065;
 
 // ============================================================
@@ -1215,6 +1223,311 @@ void safeCopy(
 
 #include "airport_boards.h"
 
+bool fetchAircraftLocal()
+{
+    if (
+        WiFi.status() !=
+        WL_CONNECTED
+    ) {
+        return false;
+    }
+
+    uint32_t started =
+        millis();
+
+    HTTPClient http;
+
+    http.setTimeout(
+        LOCAL_ADSB_TIMEOUT_MS
+    );
+
+    http.setUserAgent(
+        "NiceFlightRadarV2/2.6"
+    );
+
+    Serial.println();
+    Serial.println(
+        "[ADSB] LOCAL GET"
+    );
+
+    Serial.println(
+        LOCAL_ADSB_URL
+    );
+
+    if (
+        !http.begin(
+            LOCAL_ADSB_URL
+        )
+    ) {
+        Serial.println(
+            "[ADSB] LOCAL begin failed"
+        );
+
+        return false;
+    }
+
+    int httpCode =
+        http.GET();
+
+    uint32_t requestDuration =
+        millis() -
+        started;
+
+    if (
+        httpCode !=
+        HTTP_CODE_OK
+    ) {
+        Serial.printf(
+            "[ADSB] LOCAL HTTP %d / %lu ms\n",
+            httpCode,
+            requestDuration
+        );
+
+        http.end();
+
+        return false;
+    }
+
+    String payload =
+        http.getString();
+
+    http.end();
+
+    Serial.printf(
+        "[ADSB] LOCAL payload %u bytes / %lu ms\n",
+        (unsigned)payload.length(),
+        requestDuration
+    );
+
+    // Only deserialize the fields required by the radar.
+    JsonDocument filter;
+
+    JsonObject aircraftFilter =
+        filter[
+            "aircraft"
+        ].add<JsonObject>();
+
+    aircraftFilter["hex"] =
+        true;
+
+    aircraftFilter["flight"] =
+        true;
+
+    aircraftFilter["lat"] =
+        true;
+
+    aircraftFilter["lon"] =
+        true;
+
+    aircraftFilter["alt"] =
+        true;
+
+    aircraftFilter["ground"] =
+        true;
+
+    aircraftFilter["baro_rate"] =
+        true;
+
+    aircraftFilter["gs"] =
+        true;
+
+    aircraftFilter["track"] =
+        true;
+
+    JsonDocument doc;
+
+    DeserializationError error =
+        deserializeJson(
+            doc,
+            payload,
+            DeserializationOption::Filter(
+                filter
+            )
+        );
+
+    if (error)
+    {
+        Serial.print(
+            "[ADSB] LOCAL JSON error: "
+        );
+
+        Serial.println(
+            error.c_str()
+        );
+
+        return false;
+    }
+
+    JsonArray planes =
+        doc[
+            "aircraft"
+        ].as<JsonArray>();
+
+    Aircraft temp[
+        MAX_AIRCRAFT
+    ];
+
+    int tempCount =
+        0;
+
+    for (
+        JsonObject plane :
+        planes
+    ) {
+        if (
+            tempCount >=
+            MAX_AIRCRAFT
+        ) {
+            break;
+        }
+
+        if (
+            !plane["lat"].is<double>() ||
+            !plane["lon"].is<double>()
+        ) {
+            continue;
+        }
+
+        Aircraft ac;
+
+        safeCopy(
+            ac.hex,
+            sizeof(ac.hex),
+            plane["hex"] | ""
+        );
+
+        safeCopy(
+            ac.callsign,
+            sizeof(ac.callsign),
+            plane["flight"] | ""
+        );
+
+        // Remove trailing spaces from ADS-B callsigns.
+        for (
+            int i =
+                strlen(ac.callsign) - 1;
+            i >= 0;
+            i--
+        ) {
+            if (
+                ac.callsign[i] == ' '
+            ) {
+                ac.callsign[i] =
+                    '\0';
+            }
+            else {
+                break;
+            }
+        }
+
+        ac.lat =
+            plane["lat"];
+
+        ac.lon =
+            plane["lon"];
+
+        ac.onGround =
+            plane["ground"] |
+            false;
+
+        if (
+            plane["alt"].is<int>()
+        ) {
+            ac.altitude =
+                plane["alt"];
+        }
+        else {
+            ac.altitude =
+                0;
+        }
+
+        ac.verticalRate =
+            plane["baro_rate"] |
+            0;
+
+        ac.speed =
+            plane["gs"] |
+            0.0f;
+
+        ac.heading =
+            plane["track"] |
+            0.0f;
+
+        ac.distanceNm =
+            geographicDistanceNm(
+                RADAR_LAT,
+                RADAR_LON,
+                ac.lat,
+                ac.lon
+            );
+
+        // Same 40 NM acquisition envelope as the
+        // existing Internet source.
+        if (
+            ac.distanceNm >
+            API_RADIUS_NM
+        ) {
+            continue;
+        }
+
+        ac.bearing =
+            geographicBearing(
+                RADAR_LAT,
+                RADAR_LON,
+                ac.lat,
+                ac.lon
+            );
+
+        ac.valid =
+            true;
+
+        temp[tempCount++] =
+            ac;
+    }
+
+    if (
+        aircraftMutex ==
+        nullptr
+    ) {
+        return false;
+    }
+
+    if (
+        xSemaphoreTake(
+            aircraftMutex,
+            portMAX_DELAY
+        ) != pdTRUE
+    ) {
+        return false;
+    }
+
+    pendingAircraftCount =
+        tempCount;
+
+    for (
+        int i = 0;
+        i < tempCount;
+        i++
+    ) {
+        pendingAircraft[i] =
+            temp[i];
+    }
+
+    pendingAircraftReady =
+        true;
+
+    xSemaphoreGive(
+        aircraftMutex
+    );
+
+    Serial.printf(
+        "[ADSB] LOCAL %d aircraft ready\n",
+        tempCount
+    );
+
+    return true;
+}
+
 bool fetchAircraftNetwork()
 {
     if (
@@ -1228,8 +1541,31 @@ bool fetchAircraftNetwork()
         return false;
     }
 
+    // ========================================================
+    // V2.6
+    // Local Raspberry Pi ADS-B is the primary source.
+    // Existing adsb.fi acquisition below remains the fallback.
+    // ========================================================
+
     networkRequestActive =
         true;
+
+    if (
+        fetchAircraftLocal()
+    ) {
+        Serial.println(
+            "[ADSB] SOURCE LOCAL"
+        );
+
+        networkRequestActive =
+            false;
+
+        return true;
+    }
+
+    Serial.println(
+        "[ADSB] LOCAL unavailable -> adsb.fi fallback"
+    );
 
     uint32_t started =
         millis();
@@ -1241,7 +1577,7 @@ bool fetchAircraftNetwork()
     );
 
     http.setUserAgent(
-        "NiceFlightRadarV2/2.5"
+        "NiceFlightRadarV2/2.6"
     );
 
     String url =
@@ -3111,7 +3447,7 @@ void setup()
     );
 
     Serial.println(
-        "[RADAR] V2.5 LIVE READY"
+        "[RADAR] V2.6 LOCAL ADS-B READY"
     );
 
     fpsTimer =
